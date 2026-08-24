@@ -156,7 +156,8 @@ Weights come from public HuggingFace repos; no HF token is needed.
 ### Optional: phone access
 
 Not covered by `install.sh` — see [Phone access](#phone-access) below. It needs
-Tailscale on the machine, plus the pi-remote extension registered in pi's
+Tailscale on the machine, plus
+[`noahsaso/pi-remote`](https://github.com/noahsaso/pi-remote) registered in pi's
 `settings.json` under `packages`.
 
 ---
@@ -365,12 +366,20 @@ its entry. A backup of the pre-MLX config is at `~/.pi/agent/models.json.bak`.
 
 ## Phone access
 
-Requires Tailscale running on the host. Inside a pi session run
-`/remote` — the **pi-remote extension** (in `settings.json` → `packages`) starts
-the discovery service and registers the route. Do **not** use the `pi-remote` CLI
-binary; it does not do the discovery-service setup.
+Requires Tailscale running on the host, plus
+[`noahsaso/pi-remote`](https://github.com/noahsaso/pi-remote) — published as
+[`@noahsaso/pi-remote`](https://www.npmjs.com/package/@noahsaso/pi-remote) —
+registered in pi's `settings.json` under `packages`:
 
-Then from the phone (on the same tailnet): `https://<host>.<tailnet>.ts.net/pi/`
+```json
+"packages": ["~/path/to/pi-remote/packages/remote"]
+```
+
+Then inside a pi session run `/remote`. The **extension** starts the discovery
+service and registers the Tailscale route. Do **not** use the `pi-remote` CLI
+binary — it serves a session but skips the discovery-service setup.
+
+From the phone (on the same tailnet): `https://<host>.<tailnet>.ts.net/pi/`
 (`tailscale serve status` prints the real hostname).
 
 Token auth is enforced; the token is printed with a QR code in the terminal.
