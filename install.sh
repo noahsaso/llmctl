@@ -124,6 +124,9 @@ if [ "$DO_PI" = 1 ] && command -v pi >/dev/null; then
   echo
   echo "pi providers"
   "$DIR/llmctl" pi-setup || note "pi-setup failed"
+  echo
+  echo "pi tool-policy extension"
+  "$DIR/llmctl" pi-extension install || note "extension registration failed"
 fi
 
 if [ -n "$todo" ]; then

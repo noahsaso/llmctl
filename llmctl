@@ -13,6 +13,7 @@
 #   llmctl pi-setup [<model>]  write/refresh pi provider entries
 #   llmctl tools [<model>|scan]  show each model's tool allowlist
 #   llmctl config <sub>        per-machine overrides: show|init|set|unset|path
+#   llmctl pi-extension [install|uninstall]  register the tool-policy extension
 #
 # Only one model server is meant to run at a time: together they exceed the
 # 48 GiB Metal working set. `start` enforces that unless you pass --keep.
@@ -60,7 +61,7 @@ ROOT="$(cd "$(dirname "$SELF")" && pwd)"
 # grep/find/ls are built in but OFF by default, so "everything" must name them.
 # Refresh this list after adding/removing pi extensions: llmctl tools scan
 TOOLS_BUILTIN="read,bash,edit,write,grep,find,ls"
-TOOLS_EXT="todo_add,todo_list,todo_remove,todo_toggle,clipboard_read,clipboard_write,watch_start,watch_stop,watch_list,watch_events,memory_save,memory_search,memory_list,memory_remove,ast_symbols,ast_references,ast_rename,subagent_sync,ask_user,notify,context_checkout,context_log,context_tag"
+TOOLS_EXT="todo_add,todo_list,todo_remove,todo_toggle,clipboard_read,clipboard_write,watch_start,watch_stop,watch_list,watch_events,memory_save,memory_search,memory_list,memory_remove,ast_symbols,ast_references,ast_rename,subagent,subagent_sync,subagent_interrupt,subagent_resume,subagents_list,ask_user,notify,context_checkout,context_log,context_tag"
 # Anything that reaches the public internet.
 TOOLS_NET="websearch,web_search_exa,webfetch,generate_image"
 
@@ -71,6 +72,16 @@ tools_for() {
     offline) echo "$TOOLS_BUILTIN,$TOOLS_EXT" ;;
     default) echo "" ;;
     *)       eff "$1" toolpolicy ;;   # literal allowlist
+  esac
+}
+
+# deny_for <model> -> tools to hide, for the llmctl-tools pi extension.
+# A denylist is used at runtime because pi registers some tools dynamically:
+# an allowlist silently drops anything the static inventory missed.
+deny_for() {
+  case "$(eff "$1" toolpolicy)" in
+    offline) echo "$TOOLS_NET" ;;
+    *)       echo "" ;;
   esac
 }
 
@@ -396,7 +407,7 @@ cmd_pi_setup() {
   # Build "provider|label|baseUrl|id|ctx" lines for python to merge.
   local spec=""
   for m in $list; do
-    spec="$spec$(meta "$m" provider)|$(meta "$m" label)|http://127.0.0.1:$(meta "$m" port)/v1|$(meta "$m" id)|$(eff "$m" ctx)
+    spec="$spec$(meta "$m" provider)|$(meta "$m" label)|http://127.0.0.1:$(meta "$m" port)/v1|$(meta "$m" id)|$(eff "$m" ctx)|$(tools_for "$m")|$(deny_for "$m")|$(eff "$m" toolpolicy)
 "
   done
 
@@ -420,10 +431,12 @@ if os.path.exists(path):
 
 providers = doc.setdefault("providers", {})
 changed = []
+rows = []
 for line in os.environ.get("LLMCTL_SPEC", "").splitlines():
     if not line.strip():
         continue
-    name, label, url, mid, ctx = line.split("|")
+    name, label, url, mid, ctx, tools, deny, pol = line.split("|")
+    rows.append((name, label, url, mid, ctx, tools, deny, pol))
     entry = {
         "baseUrl": url,
         "apiKey": "unused",
@@ -441,6 +454,29 @@ for line in os.environ.get("LLMCTL_SPEC", "").splitlines():
     providers[name] = entry
 
 json.dump(doc, open(path, "w"), indent=2)
+
+# Policy file for the llmctl-tools pi extension, keyed by pi's provider/id.
+# Empty tools list = no restriction (pi's own defaults).
+pol_path = os.environ.get("LLMCTL_TOOL_POLICY") or os.path.expanduser("~/.config/llmctl/tool-policy.json")
+os.makedirs(os.path.dirname(pol_path), exist_ok=True)
+try:
+    pol = json.load(open(pol_path))
+except Exception:
+    pol = {}
+for name, label, url, mid, ctx, tools, deny, policy in rows:
+    key = "%s/%s" % (name, mid)
+    if deny:
+        pol[key] = {"deny": deny.split(","), "model": label}
+    elif policy in ("all", "default"):
+        # no runtime restriction; the extension activates everything, so tools
+        # registered dynamically are not silently dropped
+        pol.pop(key, None)
+    elif tools:
+        pol[key] = {"tools": tools.split(","), "model": label}
+    else:
+        pol.pop(key, None)
+json.dump(pol, open(pol_path, "w"), indent=2)
+print("  tool policy: %s" % pol_path)
 if changed:
     print("  updated: " + ", ".join(changed))
 else:
@@ -551,6 +587,44 @@ cmd_config() {
   esac
 }
 
+
+cmd_pi_extension() {
+  local ext="$ROOT/pi-extension/llmctl-tools.ts"
+  [ -f "$ext" ] || { echo "error: $ext missing" >&2; exit 1; }
+  local settings="${PI_SETTINGS:-$HOME/.pi/agent/settings.json}"
+  LLMCTL_EXT="$ext" python3 - "$settings" "${1:-install}" <<'PY'
+import json, os, shutil, sys
+path, action = os.path.expanduser(sys.argv[1]), sys.argv[2]
+ext = os.environ["LLMCTL_EXT"]
+try:
+    doc = json.load(open(path))
+except FileNotFoundError:
+    doc = {}
+except Exception as e:
+    print("error: %s is not valid JSON (%s); refusing to touch it" % (path, e), file=sys.stderr)
+    sys.exit(1)
+exts = doc.setdefault("extensions", [])
+if action == "uninstall":
+    if ext in exts:
+        exts.remove(ext)
+        shutil.copyfile(path, path + ".bak"); json.dump(doc, open(path, "w"), indent=2)
+        print("  removed from %s" % path)
+    else:
+        print("  was not registered")
+    sys.exit(0)
+if ext in exts:
+    print("  already registered in %s" % path)
+    sys.exit(0)
+exts.append(ext)
+if os.path.exists(path):
+    shutil.copyfile(path, path + ".bak")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump(doc, open(path, "w"), indent=2)
+print("  registered %s" % ext)
+print("  restart pi to load it")
+PY
+}
+
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-status}" in
@@ -565,6 +639,7 @@ case "${1:-status}" in
   pi-setup) shift; cmd_pi_setup "${1:-all}" ;;
   tools)   shift; cmd_tools "${1:-}" ;;
   config)  shift; cmd_config "$@" ;;
+  pi-extension) shift; cmd_pi_extension "${1:-install}" ;;
   doctor|check) cmd_doctor ;;
   -h|--help|help) usage ;;
   *) echo "unknown command: $1" >&2; echo; usage; exit 2 ;;

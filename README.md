@@ -162,6 +162,41 @@ Defaults:
 and `llmctl pi-setup` writes it as pi's `contextWindow`. After changing it,
 restart the server and re-run `pi-setup` — `llmctl config set` reminds you.
 
+### Enforcing policy inside a session
+
+`--tools` binds at launch, so switching model with `/model` (or Ctrl+P, or a
+session restore) leaves the *previous* model's tools active. pi has no native
+per-model tool setting — `models.json` and `settings.json` both lack one.
+
+`pi-extension/llmctl-tools.ts` closes that. It applies the policy on every model
+change using `pi.setActiveTools()`, so excluded tools are **absent from the
+prompt entirely** rather than blocked at call time — they cost no tokens.
+
+```
+llmctl pi-extension install     register it in pi's settings.json
+llmctl pi-extension uninstall   remove it
+```
+
+Policy comes from `~/.config/llmctl/tool-policy.json`, written by
+`llmctl pi-setup` and keyed by `<provider>/<model id>`, so `llmctl` stays the
+single source of truth. A model absent from that file gets no restriction.
+
+**It is a denylist, deliberately.** pi registers some tools at runtime that a
+static source scan cannot see — several `subagent_*` tools do exactly this. An
+allowlist silently drops them; a denylist leaves anything unlisted active. This
+was not hypothetical: the first allowlist version disabled four subagent tools by
+accident.
+
+Verified with a probe extension reading `pi.getActiveTools()`:
+
+```
+PROBE[before_agent_start] active=34/37 hidden=[generate_image,webfetch,websearch]
+```
+
+Note the policy applies during `session_start`, so anything inspecting the tool
+set in its own `session_start` handler may observe the pre-policy state
+depending on handler order. By `before_agent_start` it has taken effect.
+
 ## Bootstrapping a new machine
 
 This repo holds the layout, scripts, and docs — **not** the weights (tens of GB,
