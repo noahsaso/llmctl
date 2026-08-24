@@ -11,6 +11,7 @@
 #   llmctl logs <model> [n]    tail that server's tmux output
 #   llmctl download <model>    fetch that model's weights
 #   llmctl pi-setup [<model>]  write/refresh pi provider entries
+#   llmctl tools [<model>|scan] show each model's tool allowlist
 #
 # Only one model server is meant to run at a time: together they exceed the
 # 48 GiB Metal working set. `start` enforces that unless you pass --keep.
@@ -32,6 +33,26 @@ while [ -L "$SELF" ]; do
 done
 ROOT="$(cd "$(dirname "$SELF")" && pwd)"
 
+
+# ---------- tool policy ----------
+# pi's --tools is an ALLOWLIST covering built-in, extension and custom tools.
+# grep/find/ls are built in but OFF by default, so "everything" must name them.
+# Refresh this list after adding/removing pi extensions: llmctl tools scan
+TOOLS_BUILTIN="read,bash,edit,write,grep,find,ls"
+TOOLS_EXT="todo_add,todo_list,todo_remove,todo_toggle,clipboard_read,clipboard_write,watch_start,watch_stop,watch_list,watch_events,memory_save,memory_search,memory_list,memory_remove,ast_symbols,ast_references,ast_rename,subagent_sync,ask_user,notify,context_checkout,context_log,context_tag"
+# Anything that reaches the public internet.
+TOOLS_NET="websearch,web_search_exa,webfetch,generate_image"
+
+# tools_for <model> -> comma list for --tools, or empty for pi's own defaults
+tools_for() {
+  case "$(meta "$1" toolpolicy)" in
+    all)     echo "$TOOLS_BUILTIN,$TOOLS_EXT,$TOOLS_NET" ;;
+    offline) echo "$TOOLS_BUILTIN,$TOOLS_EXT" ;;
+    default) echo "" ;;
+    *)       meta "$1" toolpolicy ;;   # literal allowlist
+  esac
+}
+
 # ---------- registry ----------
 meta() { # meta <model> <field>
   case "$1:$2" in
@@ -46,6 +67,7 @@ meta() { # meta <model> <field>
     qwen3.6:label)    echo "Local Qwen3.6 35B-A3B (Q4_K_M, Metal)" ;;
     qwen3.6:ctx)      echo "131072" ;;
     qwen3.6:size)     echo "~23 GB" ;;
+    qwen3.6:toolpolicy) echo "all" ;;
 
     qwen3.8:session)  echo "mlx" ;;
     qwen3.8:port)     echo "8081" ;;
@@ -58,6 +80,7 @@ meta() { # meta <model> <field>
     qwen3.8:label)    echo "Local Qwen3.8 27B Uncensored (MLX 4-bit)" ;;
     qwen3.8:ctx)      echo "32768" ;;
     qwen3.8:size)     echo "~16 GB" ;;
+    qwen3.8:toolpolicy) echo "offline" ;;
     *) return 1 ;;
   esac
 }
@@ -201,12 +224,14 @@ cmd_use() {
   need_model "${1:-}"
   cmd_start "$1"
   echo
+  local t; t="$(tools_for "$1")"
+  local targ=""; [ -n "$t" ] && targ=" --tools $t"
   echo "pi command:"
-  echo "  pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'"
+  echo "  pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'$targ"
   echo
   echo "as a fresh tmux pi session:"
   echo "  tmux kill-session -t pi 2>/dev/null; tmux new-session -d -s pi -c ~/workspace \\"
-  echo "    \"pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'\""
+  echo "    \"pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'$targ\""
   echo
   echo "note: pi reads models.json at startup - restart pi to pick up config changes."
 }
@@ -279,6 +304,36 @@ except Exception: print('')" 2>/dev/null)
     fi
   done
 
+
+  echo
+  echo "tool policy"
+  # pi silently ignores unknown --tools names, so a typo or a removed extension
+  # quietly disables a tool. Cross-check the configured lists against reality.
+  _extdir="${PI_EXT_DIR:-$HOME/.my-pi/extensions}"
+  if [ -d "$_extdir" ]; then
+    _found=$(find "$_extdir" -maxdepth 3 -name "*.ts" ! -path "*/node_modules/*" ! -path "*/test/*" ! -path "*/tests/*" ! -name "*.test.ts" 2>/dev/null \
+      | xargs grep -ohE 'name:[[:space:]]*"[a-z_][a-z0-9_]*"' 2>/dev/null \
+      | sed 's/.*"\(.*\)"/\1/' | sort -u)
+    _known=$(printf '%s\n%s\n%s\n%s\n' "$TOOLS_BUILTIN" "$TOOLS_EXT" "$TOOLS_NET" "$_found" \
+      | tr ',' '\n' | sed '/^$/d' | sort -u)
+    _configured=$(printf '%s,%s,%s' "$TOOLS_BUILTIN" "$TOOLS_EXT" "$TOOLS_NET" | tr ',' '\n' | sed '/^$/d' | sort -u)
+    _builtin_l=$(echo "$TOOLS_BUILTIN" | tr ',' '\n' | sort -u)
+
+    _ghost=$(comm -23 <(echo "$_configured") <(printf '%s\n%s\n' "$_found" "$_builtin_l" | sort -u))
+    if [ -n "$_ghost" ]; then
+      note "configured but not found (typo or removed extension): $(echo $_ghost | tr '\n' ' ')"
+    else ok "every configured tool name exists"; fi
+
+    _new=$(comm -13 <(echo "$_configured") <(echo "$_found"))
+    if [ -n "$_new" ]; then
+      note "discovered but not in any policy: $(echo $_new | tr '\n' ' ')  (add to TOOLS_EXT/TOOLS_NET)"
+    else ok "no uncategorised extension tools"; fi
+  else
+    note "extension dir $_extdir not found; skipping tool-name check (set PI_EXT_DIR)"
+  fi
+  for m in $MODELS; do
+    ok "$m tool policy: $(meta "$m" toolpolicy) ($(tools_for "$m" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') tools)"
+  done
   echo
   echo "environment"
   local running=0
@@ -369,6 +424,34 @@ PY
   echo "  (pi reads this at startup - restart pi to pick it up)"
 }
 
+
+cmd_tools() {
+  if [ "${1:-}" = "scan" ]; then
+    local extdir="${PI_EXT_DIR:-$HOME/.my-pi/extensions}"
+    [ -d "$extdir" ] || { echo "no extension dir at $extdir (set PI_EXT_DIR)" >&2; exit 1; }
+    echo "tool names found under $extdir:"
+    find "$extdir" -maxdepth 3 -name "*.ts" ! -path "*/node_modules/*" ! -path "*/test/*" ! -path "*/tests/*" ! -name "*.test.ts" 2>/dev/null | while read -r f; do
+      local n; n=$(grep -ohE 'name:[[:space:]]*"[a-z_][a-z0-9_]*"' "$f" 2>/dev/null \
+                   | sed 's/.*"\(.*\)"/\1/' | sort -u | tr '\n' ' ')
+      [ -n "$n" ] && printf "  %-32s %s\n" "$(basename "$(dirname "$f")")/$(basename "$f")" "$n"
+    done
+    echo
+    echo "built-in: $TOOLS_BUILTIN"
+    echo "(update TOOLS_EXT / TOOLS_NET at the top of this script to match)"
+    return 0
+  fi
+
+  local list="${1:-$MODELS}"
+  [ "$list" != "$MODELS" ] && need_model "$1"
+  for m in $list; do
+    local pol t; pol="$(meta "$m" toolpolicy)"; t="$(tools_for "$m")"
+    echo "$m  (policy: $pol)"
+    if [ -z "$t" ]; then echo "  pi defaults (no --tools passed)"
+    else echo "$t" | tr ',' '\n' | sed 's/^/  /'; fi
+    echo
+  done
+}
+
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-status}" in
@@ -381,6 +464,7 @@ case "${1:-status}" in
   logs)    shift; cmd_logs "${1:-}" "${2:-40}" ;;
   download) shift; cmd_download "${1:-}" ;;
   pi-setup) shift; cmd_pi_setup "${1:-all}" ;;
+  tools)   shift; cmd_tools "${1:-}" ;;
   doctor|check) cmd_doctor ;;
   -h|--help|help) usage ;;
   *) echo "unknown command: $1" >&2; echo; usage; exit 2 ;;

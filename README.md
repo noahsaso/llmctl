@@ -82,6 +82,39 @@ server is up, and if tmux `extended-keys-format` is not `csi-u`.
 Measured cold starts: qwen3.6 ~10s, qwen3.8 ~12s (weights in page cache).
 
 
+## Tool policy
+
+pi's `--tools` is an **allowlist** spanning built-in, extension and custom tools.
+`llmctl` keeps a policy per model and emits the right flag from `llmctl use`:
+
+```
+llmctl tools              show both models' effective lists
+llmctl tools qwen3.8      show one
+llmctl tools scan         rediscover tool names from pi's extensions
+```
+
+| Policy | Meaning |
+|---|---|
+| `all` | built-ins + every extension tool, network included |
+| `offline` | same, minus anything that reaches the internet |
+| `default` | pass no `--tools`; pi's own defaults |
+| *literal list* | used verbatim as the allowlist |
+
+Current defaults: **qwen3.6 = `all`** (34 tools), **qwen3.8 = `offline`** (30) —
+excluding `websearch`, `web_search_exa`, `webfetch` and `generate_image`.
+
+Two things worth knowing:
+
+- `grep`, `find` and `ls` are built in but **off by default** in pi. Any policy
+  meaning "everything" has to name them explicitly, which `all` does.
+- **pi silently ignores unknown tool names.** A typo, or an extension you
+  removed, quietly disables a tool with no error. `llmctl doctor` guards this by
+  scanning pi's extension sources and reporting names that are configured but
+  missing, or discovered but not yet categorised.
+
+Edit `TOOLS_BUILTIN` / `TOOLS_EXT` / `TOOLS_NET` at the top of `llmctl` after
+changing extensions; `llmctl tools scan` prints what to put there.
+
 ## Bootstrapping a new machine
 
 This repo holds the layout, scripts, and docs — **not** the weights (tens of GB,
