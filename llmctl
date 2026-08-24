@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+# llmctl - orchestrate the local model servers.
+#
+#   llmctl status              what is running right now
+#   llmctl list                available models
+#   llmctl start <model>       start one (stops the others first)
+#   llmctl stop [<model>|all]  stop one or everything
+#   llmctl restart <model>     stop + start
+#   llmctl use <model>         start it and print the pi command
+#   llmctl doctor              verify pi config matches reality
+#   llmctl logs <model> [n]    tail that server's tmux output
+#   llmctl download <model>    fetch that model's weights
+#   llmctl pi-setup [<model>]  write/refresh pi provider entries
+#
+# Only one model server is meant to run at a time: together they exceed the
+# 48 GiB Metal working set. `start` enforces that unless you pass --keep.
+
+set -uo pipefail
+
+MODELS="qwen3.6 qwen3.8"
+PI_MODELS="${PI_MODELS:-$HOME/.pi/agent/models.json}"
+
+# Repo root, resolved through any symlink (llmctl is normally linked onto PATH).
+# Everything is relative to this, so the checkout can live anywhere.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  _t="$(readlink "$SELF")"
+  case "$_t" in
+    /*) SELF="$_t" ;;
+    *)  SELF="$(dirname "$SELF")/$_t" ;;
+  esac
+done
+ROOT="$(cd "$(dirname "$SELF")" && pwd)"
+
+# ---------- registry ----------
+meta() { # meta <model> <field>
+  case "$1:$2" in
+    qwen3.6:session)  echo "llama" ;;
+    qwen3.6:port)     echo "8080" ;;
+    qwen3.6:dir)      echo "$ROOT/qwen3.6" ;;
+    qwen3.6:health)   echo "/health" ;;
+    qwen3.6:provider) echo "llama-server" ;;
+    qwen3.6:id)       echo "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
+    qwen3.6:weights)  echo "$ROOT/qwen3.6/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
+    qwen3.6:desc)     echo "35B-A3B MoE, GGUF/llama.cpp, ~40 tok/s" ;;
+    qwen3.6:label)    echo "Local Qwen3.6 35B-A3B (Q4_K_M, Metal)" ;;
+    qwen3.6:ctx)      echo "131072" ;;
+    qwen3.6:size)     echo "~23 GB" ;;
+
+    qwen3.8:session)  echo "mlx" ;;
+    qwen3.8:port)     echo "8081" ;;
+    qwen3.8:dir)      echo "$ROOT/qwen3.8-mlx" ;;
+    qwen3.8:health)   echo "/v1/models" ;;
+    qwen3.8:provider) echo "mlx-qwen3.8" ;;
+    qwen3.8:id)       echo "$ROOT/qwen3.8-mlx/4-bit" ;;
+    qwen3.8:weights)  echo "$ROOT/qwen3.8-mlx/4-bit" ;;
+    qwen3.8:desc)     echo "27B dense, MLX 4-bit, ~13 tok/s" ;;
+    qwen3.8:label)    echo "Local Qwen3.8 27B Uncensored (MLX 4-bit)" ;;
+    qwen3.8:ctx)      echo "32768" ;;
+    qwen3.8:size)     echo "~16 GB" ;;
+    *) return 1 ;;
+  esac
+}
+
+valid() { case " $MODELS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+need_model() {
+  if [ -z "${1:-}" ]; then echo "error: need a model name. Try: llmctl list" >&2; exit 2; fi
+  if ! valid "$1"; then echo "error: unknown model '$1'. Try: llmctl list" >&2; exit 2; fi
+}
+
+# ---------- probes ----------
+is_up() { # is_up <model>
+  curl -sf -o /dev/null --max-time 3 \
+    "http://127.0.0.1:$(meta "$1" port)$(meta "$1" health)" 2>/dev/null
+}
+has_session() { tmux has-session -t "$(meta "$1" session)" 2>/dev/null; }
+srv_pid() { lsof -nP -iTCP:"$(meta "$1" port)" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $2}'; }
+srv_rss() { # GiB
+  local p; p=$(srv_pid "$1"); [ -n "$p" ] || return 1
+  ps -o rss= -p "$p" 2>/dev/null | awk '{printf "%.1f", $1/1024/1024}'
+}
+
+pi_field() { # pi_field <provider> <jq-ish field>
+  [ -f "$PI_MODELS" ] || return 1
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json,sys,os
+try: d=json.load(open(os.path.expanduser("~/.pi/agent/models.json")))
+except Exception: sys.exit(1)
+p=d.get("providers",{}).get(sys.argv[1])
+if not p: sys.exit(1)
+f=sys.argv[2]
+if f=="baseUrl": print(p.get("baseUrl",""))
+else: print(p.get("models",[{}])[0].get(f,""))
+PY
+}
+
+# ---------- commands ----------
+cmd_list() {
+  printf "%-9s %-8s %-6s %s\n" MODEL SESSION PORT DESCRIPTION
+  for m in $MODELS; do
+    printf "%-9s %-8s %-6s %s\n" "$m" "$(meta "$m" session)" "$(meta "$m" port)" "$(meta "$m" desc)"
+  done
+}
+
+cmd_status() {
+  local any=0
+  printf "%-9s %-9s %-6s %-8s %-7s %s\n" MODEL STATE PORT SESSION MEM PROVIDER
+  for m in $MODELS; do
+    local state mem sess
+    sess="-"; mem="-"
+    has_session "$m" && sess="$(meta "$m" session)"
+    if is_up "$m"; then
+      state="running"; any=1; mem="$(srv_rss "$m" 2>/dev/null || echo "-")"
+      [ "$mem" != "-" ] && mem="${mem}G"
+    elif has_session "$m"; then
+      state="starting"
+    else
+      state="stopped"
+    fi
+    printf "%-9s %-9s %-6s %-8s %-7s %s\n" \
+      "$m" "$state" "$(meta "$m" port)" "$sess" "$mem" "$(meta "$m" provider)"
+  done
+  [ "$any" = 0 ] && echo && echo "nothing running. start one: llmctl start <model>"
+  # pi session is informational
+  echo
+  if tmux has-session -t pi 2>/dev/null; then
+    echo "pi: tmux session 'pi' is up (attach: tmux attach -t pi)"
+  else
+    echo "pi: not running"
+  fi
+}
+
+cmd_stop() {
+  local target="${1:-all}"
+  for m in $MODELS; do
+    if [ "$target" = "all" ] || [ "$target" = "$m" ]; then
+      if has_session "$m"; then
+        tmux kill-session -t "$(meta "$m" session)" 2>/dev/null
+        echo "stopped $m"
+      fi
+    fi
+  done
+  # wait for ports to clear
+  for m in $MODELS; do
+    if [ "$target" = "all" ] || [ "$target" = "$m" ]; then
+      local n=0
+      while is_up "$m" && [ $n -lt 30 ]; do sleep 1; n=$((n+1)); done
+    fi
+  done
+}
+
+cmd_start() {
+  local keep=0 model=""
+  for a in "$@"; do
+    case "$a" in
+      --keep) keep=1 ;;
+      *) model="$a" ;;
+    esac
+  done
+  need_model "$model"
+
+  if [ "$keep" = 0 ]; then
+    for m in $MODELS; do
+      [ "$m" = "$model" ] && continue
+      if has_session "$m"; then
+        echo "stopping $m (only one model at a time; use --keep to override)"
+        cmd_stop "$m"
+      fi
+    done
+  fi
+
+  if is_up "$model"; then echo "$model already running"; return 0; fi
+
+  local dir; dir="$(meta "$model" dir)"
+  if [ ! -x "$dir/serve.sh" ]; then
+    echo "error: $dir/serve.sh missing or not executable" >&2; exit 1
+  fi
+  tmux kill-session -t "$(meta "$model" session)" 2>/dev/null
+  tmux new-session -d -s "$(meta "$model" session)" -c "$dir" './serve.sh'
+  printf "starting %s" "$model"
+  local n=0
+  while ! is_up "$model" && [ $n -lt 300 ]; do
+    if ! has_session "$model"; then
+      echo; echo "error: session died during startup. logs:" >&2
+      cmd_logs "$model" 15; exit 1
+    fi
+    printf "."; sleep 2; n=$((n+2))
+  done
+  echo
+  if is_up "$model"; then
+    echo "$model up on port $(meta "$model" port) (${n}s)"
+  else
+    echo "error: $model did not become healthy in ${n}s" >&2; exit 1
+  fi
+}
+
+cmd_restart() { need_model "${1:-}"; cmd_stop "$1"; cmd_start "$1"; }
+
+cmd_use() {
+  need_model "${1:-}"
+  cmd_start "$1"
+  echo
+  echo "pi command:"
+  echo "  pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'"
+  echo
+  echo "as a fresh tmux pi session:"
+  echo "  tmux kill-session -t pi 2>/dev/null; tmux new-session -d -s pi -c ~/workspace \\"
+  echo "    \"pi --provider $(meta "$1" provider) --model '$(meta "$1" id)'\""
+  echo
+  echo "note: pi reads models.json at startup - restart pi to pick up config changes."
+}
+
+cmd_logs() { need_model "${1:-}"; tmux capture-pane -p -S -"${2:-40}" -t "$(meta "$1" session)" 2>/dev/null \
+  | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^[[:space:]]*$' | tail -"${2:-40}" \
+  || echo "no session for $1"; }
+
+cmd_doctor() {
+  local fail=0 warn=0
+  ok()   { printf "  \033[32mok\033[0m    %s\n" "$1"; }
+  bad()  { printf "  \033[31mFAIL\033[0m  %s\n" "$1"; fail=$((fail+1)); }
+  note() { printf "  \033[33mwarn\033[0m  %s\n" "$1"; warn=$((warn+1)); }
+
+  echo "pi config"
+  if [ ! -f "$PI_MODELS" ]; then bad "$PI_MODELS missing"; else
+    if python3 -c "import json,sys;json.load(open('$PI_MODELS'))" 2>/dev/null; then
+      ok "models.json is valid JSON"
+    else bad "models.json is NOT valid JSON"; fi
+  fi
+
+  for m in $MODELS; do
+    echo
+    echo "$m"
+    local prov port want_url have_url want_id have_id ctx
+    prov="$(meta "$m" provider)"; port="$(meta "$m" port)"
+    want_url="http://127.0.0.1:$port/v1"
+
+    [ -e "$(meta "$m" weights)" ] && ok "weights present" || bad "weights missing: $(meta "$m" weights)"
+    [ -x "$(meta "$m" dir)/serve.sh" ] && ok "serve.sh executable" || bad "serve.sh missing/not executable"
+
+    have_url="$(pi_field "$prov" baseUrl)" || have_url=""
+    if [ -z "$have_url" ]; then bad "pi provider '$prov' not found in models.json"
+    elif [ "$have_url" = "$want_url" ]; then ok "provider '$prov' -> $have_url"
+    else bad "provider '$prov' baseUrl is $have_url, expected $want_url"; fi
+
+    want_id="$(meta "$m" id)"; have_id="$(pi_field "$prov" id)" || have_id=""
+    if [ -n "$have_id" ]; then
+      [ "$have_id" = "$want_id" ] && ok "model id matches" \
+        || bad "pi model id '$have_id' != expected '$want_id'"
+    fi
+
+    ctx="$(pi_field "$prov" contextWindow)" || ctx=""
+    if [ -z "$ctx" ]; then note "no contextWindow set for '$prov'"
+    else
+      if [ "$m" = "qwen3.6" ] && is_up "$m"; then
+        local real
+        real=$(ps -o args= -p "$(srv_pid "$m")" 2>/dev/null | tr ' ' '\n' | grep -A1 '^-c$' | tail -1)
+        if [ -n "$real" ] && [ "$real" != "$ctx" ]; then
+          bad "pi contextWindow=$ctx but llama-server -c $real (must match)"
+        else ok "contextWindow=$ctx matches server -c"; fi
+      else
+        ok "contextWindow=$ctx"
+      fi
+    fi
+
+    if is_up "$m"; then
+      local served
+      served=$(curl -sf --max-time 3 "http://127.0.0.1:$port/v1/models" 2>/dev/null \
+        | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin); ms=d.get('data') or d.get('models') or []
+    print((ms[0].get('id') or ms[0].get('name','')) if ms else '')
+except Exception: print('')" 2>/dev/null)
+      if [ -n "$served" ] && [ "$served" != "$want_id" ]; then
+        note "server reports id '$served' (pi uses '$want_id')"
+      fi
+      ok "running and healthy on :$port"
+    fi
+  done
+
+  echo
+  echo "environment"
+  local running=0
+  for m in $MODELS; do is_up "$m" && running=$((running+1)); done
+  if [ "$running" -gt 1 ]; then
+    note "$running model servers running at once - together they may exceed the 48 GiB Metal budget"
+  else ok "$running model server(s) running"; fi
+
+  local ek; ek=$(tmux show -gv extended-keys-format 2>/dev/null)
+  if [ "$ek" = "csi-u" ]; then ok "tmux extended-keys-format=csi-u"
+  else note "tmux extended-keys-format=$ek (pi wants csi-u; add to ~/.tmux.conf)"; fi
+
+  if grep -q "extended-keys-format csi-u" "$HOME/.tmux.conf" 2>/dev/null; then
+    ok "csi-u persisted in ~/.tmux.conf"
+  else note "csi-u not in ~/.tmux.conf - runtime-only, lost on tmux server restart"; fi
+
+  echo
+  if [ "$fail" -gt 0 ]; then echo "$fail failure(s), $warn warning(s)"; return 1
+  else echo "all checks passed ($warn warning(s))"; fi
+}
+
+
+cmd_download() {
+  need_model "${1:-}"
+  local dl; dl="$(meta "$1" dir)/download.sh"
+  [ -x "$dl" ] || { echo "error: $dl missing or not executable" >&2; exit 1; }
+  echo "downloading $1 ($(meta "$1" size)) into $(meta "$1" dir)"
+  "$dl"
+}
+
+cmd_pi_setup() {
+  local which_m="${1:-all}"
+  local list=""
+  if [ "$which_m" = "all" ]; then list="$MODELS"; else need_model "$which_m"; list="$which_m"; fi
+
+  # Build "provider|label|baseUrl|id|ctx" lines for python to merge.
+  local spec=""
+  for m in $list; do
+    spec="$spec$(meta "$m" provider)|$(meta "$m" label)|http://127.0.0.1:$(meta "$m" port)/v1|$(meta "$m" id)|$(meta "$m" ctx)
+"
+  done
+
+  printf '%s' "$spec" | python3 - "$PI_MODELS" <<'PY'
+import json, os, sys, shutil
+path = os.path.expanduser(sys.argv[1])
+os.makedirs(os.path.dirname(path), exist_ok=True)
+
+try:
+    doc = json.load(open(path))
+except FileNotFoundError:
+    doc = {}
+except Exception as e:
+    print("error: %s is not valid JSON (%s); refusing to overwrite" % (path, e), file=sys.stderr)
+    sys.exit(1)
+
+if os.path.exists(path):
+    shutil.copyfile(path, path + ".bak")
+
+providers = doc.setdefault("providers", {})
+changed = []
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    name, label, url, mid, ctx = line.split("|")
+    entry = {
+        "baseUrl": url,
+        "apiKey": "unused",
+        "models": [{
+            "id": mid,
+            "name": label,
+            "api": "openai-completions",
+            "contextWindow": int(ctx),
+            "maxTokens": 8192,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        }],
+    }
+    if providers.get(name) != entry:
+        changed.append(name)
+    providers[name] = entry
+
+json.dump(doc, open(path, "w"), indent=2)
+if changed:
+    print("  updated: " + ", ".join(changed))
+else:
+    print("  already up to date")
+print("  providers: " + ", ".join(sorted(providers)))
+PY
+  echo "  (pi reads this at startup - restart pi to pick it up)"
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-status}" in
+  list)    cmd_list ;;
+  status|ps) cmd_status ;;
+  start)   shift; cmd_start "$@" ;;
+  stop)    shift; cmd_stop "${1:-all}" ;;
+  restart) shift; cmd_restart "${1:-}" ;;
+  use)     shift; cmd_use "${1:-}" ;;
+  logs)    shift; cmd_logs "${1:-}" "${2:-40}" ;;
+  download) shift; cmd_download "${1:-}" ;;
+  pi-setup) shift; cmd_pi_setup "${1:-all}" ;;
+  doctor|check) cmd_doctor ;;
+  -h|--help|help) usage ;;
+  *) echo "unknown command: $1" >&2; echo; usage; exit 2 ;;
+esac

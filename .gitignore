@@ -1,0 +1,15 @@
+# Model weights — never commit these
+*.gguf
+*.safetensors
+*.bin
+*.npz
+
+# Downloaded model trees (weights live alongside tokenizer/config files)
+/qwen3.8-mlx/4-bit/
+/qwen3.8-mlx/mtp/
+
+# HuggingFace download metadata
+.cache/
+**/.cache/
+
+.DS_Store
