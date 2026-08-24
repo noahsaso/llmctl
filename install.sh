@@ -57,7 +57,7 @@ echo "runtimes"
 if command -v llama-server >/dev/null; then
   ok "llama-server (build $(llama-server --version 2>&1 | head -1 | awk '{print $2}'))"
 else
-  bad "llama-server — required for qwen3.6"
+  bad "llama-server — required for qwen3-6"
   if [ "$DO_INSTALL" = 1 ] && command -v brew >/dev/null; then
     run brew install llama.cpp && ok "installed llama.cpp" || want "  llama.cpp: brew install llama.cpp"
   else want "  llama.cpp: brew install llama.cpp"; fi
@@ -66,7 +66,7 @@ fi
 PIP="${PIP:-python3 -m pip}"
 if command -v mlx_lm.server >/dev/null || [ -x "$HOME/anaconda3/bin/mlx_lm.server" ]; then ok "mlx_lm.server"
 else
-  note "mlx_lm.server — required for qwen3.8 (optional if you only run qwen3.6)"
+  note "mlx_lm.server — required for qwen3-8 (optional if you only run qwen3-6)"
   if [ "$DO_INSTALL" = 1 ]; then
     run $PIP install -U mlx-lm && ok "installed mlx-lm" || want "  mlx-lm: $PIP install -U mlx-lm"
   else want "  mlx-lm: $PIP install -U mlx-lm"; fi
@@ -136,8 +136,8 @@ fi
 
 echo
 echo "next steps"
-echo "  llmctl download qwen3.6     # ~23 GB"
-echo "  llmctl start qwen3.6"
+echo "  llmctl download qwen3-6     # ~23 GB"
+echo "  llmctl start qwen3-6"
 echo "  llmctl doctor"
 [ "$missing" = 1 ] && exit 1
 exit 0

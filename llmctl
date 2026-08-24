@@ -11,15 +11,15 @@
 #   llmctl logs <model> [n]    tail that server's tmux output
 #   llmctl download <model>    fetch that model's weights
 #   llmctl pi-setup [<model>]  write/refresh pi provider entries
-#   llmctl tools [<model>|scan] show each model's tool allowlist
-#   llmctl config [show|init|set] per-machine overrides (ctx, toolpolicy)
+#   llmctl tools [<model>|scan]  show each model's tool allowlist
+#   llmctl config <sub>        per-machine overrides: show|init|set|unset|path
 #
 # Only one model server is meant to run at a time: together they exceed the
 # 48 GiB Metal working set. `start` enforces that unless you pass --keep.
 
 set -uo pipefail
 
-MODELS="qwen3.6 qwen3.8"
+MODELS="qwen3-6 qwen3-8"
 PI_MODELS="${PI_MODELS:-$HOME/.pi/agent/models.json}"
 
 # Optional per-machine overrides. Format: one "model.key=value" per line, # comments.
@@ -77,31 +77,31 @@ tools_for() {
 # ---------- registry ----------
 meta() { # meta <model> <field>
   case "$1:$2" in
-    qwen3.6:session)  echo "llama" ;;
-    qwen3.6:port)     echo "8080" ;;
-    qwen3.6:dir)      echo "$ROOT/qwen3.6" ;;
-    qwen3.6:health)   echo "/health" ;;
-    qwen3.6:provider) echo "llama-server" ;;
-    qwen3.6:id)       echo "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
-    qwen3.6:weights)  echo "$ROOT/qwen3.6/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
-    qwen3.6:desc)     echo "35B-A3B MoE, GGUF/llama.cpp, ~40 tok/s" ;;
-    qwen3.6:label)    echo "Local Qwen3.6 35B-A3B (Q4_K_M, Metal)" ;;
-    qwen3.6:ctx)      echo "131072" ;;
-    qwen3.6:size)     echo "~23 GB" ;;
-    qwen3.6:toolpolicy) echo "all" ;;
+    qwen3-6:session)  echo "llama" ;;
+    qwen3-6:port)     echo "8080" ;;
+    qwen3-6:dir)      echo "$ROOT/qwen3-6" ;;
+    qwen3-6:health)   echo "/health" ;;
+    qwen3-6:provider) echo "llama-server" ;;
+    qwen3-6:id)       echo "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
+    qwen3-6:weights)  echo "$ROOT/qwen3-6/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ;;
+    qwen3-6:desc)     echo "35B-A3B MoE, GGUF/llama.cpp, ~40 tok/s" ;;
+    qwen3-6:label)    echo "Local Qwen3.6 35B-A3B (Q4_K_M, Metal)" ;;
+    qwen3-6:ctx)      echo "131072" ;;
+    qwen3-6:size)     echo "~23 GB" ;;
+    qwen3-6:toolpolicy) echo "all" ;;
 
-    qwen3.8:session)  echo "mlx" ;;
-    qwen3.8:port)     echo "8081" ;;
-    qwen3.8:dir)      echo "$ROOT/qwen3.8-mlx" ;;
-    qwen3.8:health)   echo "/v1/models" ;;
-    qwen3.8:provider) echo "mlx-qwen3.8" ;;
-    qwen3.8:id)       echo "$ROOT/qwen3.8-mlx/4-bit" ;;
-    qwen3.8:weights)  echo "$ROOT/qwen3.8-mlx/4-bit" ;;
-    qwen3.8:desc)     echo "27B dense, MLX 4-bit, ~13 tok/s" ;;
-    qwen3.8:label)    echo "Local Qwen3.8 27B Uncensored (MLX 4-bit)" ;;
-    qwen3.8:ctx)      echo "65536" ;;
-    qwen3.8:size)     echo "~16 GB" ;;
-    qwen3.8:toolpolicy) echo "offline" ;;
+    qwen3-8:session)  echo "mlx" ;;
+    qwen3-8:port)     echo "8081" ;;
+    qwen3-8:dir)      echo "$ROOT/qwen3-8-mlx" ;;
+    qwen3-8:health)   echo "/v1/models" ;;
+    qwen3-8:provider) echo "mlx-qwen3-8" ;;
+    qwen3-8:id)       echo "$ROOT/qwen3-8-mlx/4-bit" ;;
+    qwen3-8:weights)  echo "$ROOT/qwen3-8-mlx/4-bit" ;;
+    qwen3-8:desc)     echo "27B dense, MLX 4-bit, ~13 tok/s" ;;
+    qwen3-8:label)    echo "Local Qwen3.8 27B Uncensored (MLX 4-bit)" ;;
+    qwen3-8:ctx)      echo "65536" ;;
+    qwen3-8:size)     echo "~16 GB" ;;
+    qwen3-8:toolpolicy) echo "offline" ;;
     *) return 1 ;;
   esac
 }
@@ -301,7 +301,7 @@ cmd_doctor() {
     ctx="$(pi_field "$prov" contextWindow)" || ctx=""
     if [ -z "$ctx" ]; then note "no contextWindow set for '$prov'"
     else
-      if [ "$m" = "qwen3.6" ] && is_up "$m"; then
+      if [ "$m" = "qwen3-6" ] && is_up "$m"; then
         local real
         real=$(ps -o args= -p "$(srv_pid "$m")" 2>/dev/null | tr ' ' '\n' | grep -A1 '^-c$' | tail -1)
         if [ -n "$real" ] && [ "$real" != "$ctx" ]; then
@@ -502,7 +502,7 @@ cmd_config() {
       shift
       local kv="${1:-}" val="${2:-}"
       case "$kv" in *.*) ;; *) echo "usage: llmctl config set <model>.<key> <value>" >&2; exit 2 ;; esac
-      # model names contain dots (qwen3.8), so split on the LAST dot
+      # split on the LAST dot, so a key like a.b.c still resolves sensibly
       local m="${kv%.*}" k="${kv##*.}"
       need_model "$m"
       case "$k" in ctx|toolpolicy) ;; *) echo "error: only ctx and toolpolicy are overridable" >&2; exit 2 ;; esac

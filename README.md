@@ -23,8 +23,8 @@ Started 2026-08-16 (Model A); Model B added 2026-08-24.
 
 | Piece | Where | Notes |
 |---|---|---|
-| llama-server | tmux session `llama` | `~/models/qwen3.6/serve.sh`, binds `127.0.0.1:8080` |
-| mlx_lm.server | tmux session `mlx` | `~/models/qwen3.8-mlx/serve.sh`, binds `127.0.0.1:8081` |
+| llama-server | tmux session `llama` | `~/models/qwen3-6/serve.sh`, binds `127.0.0.1:8080` |
+| mlx_lm.server | tmux session `mlx` | `~/models/qwen3-8-mlx/serve.sh`, binds `127.0.0.1:8081` |
 | pi | tmux session `pi` | cwd `~/workspace`, provider `llama-server` |
 | pi-remote | pi extension (not the CLI binary) | discovery on `:7008`, session on `:7009` |
 | Tailscale serve | `<host>.<tailnet>.ts.net` | `/pi/` → 7008, `/pi/<id>/` → 7009 |
@@ -36,10 +36,10 @@ SSH disconnects.
 
 ```bash
 # model server
-tmux new-session -d -s llama -c ~/models/qwen3.6 './serve.sh'
+tmux new-session -d -s llama -c ~/models/qwen3-6 './serve.sh'
 
 # second model server (MLX)
-tmux new-session -d -s mlx -c ~/models/qwen3.8-mlx './serve.sh'
+tmux new-session -d -s mlx -c ~/models/qwen3-8-mlx './serve.sh'
 
 # pi
 tmux new-session -d -s pi -c ~/workspace \
@@ -54,22 +54,40 @@ Health checks: `curl -s localhost:8080/health` · `curl -s localhost:8081/v1/mod
 
 ## Orchestration: `llmctl`
 
-`~/models/llmctl` (symlinked onto PATH as `llmctl`) drives the model servers.
+`<repo>/llmctl` (symlinked onto PATH by `install.sh`) drives the whole stack.
 
 ```
-llmctl status              what is running right now
-llmctl list                available models
-llmctl start <model>       start one (stops the others first)
-llmctl stop [<model>|all]  stop one or everything
-llmctl restart <model>     stop + start
-llmctl use <model>         start it and print the pi command to match
-llmctl doctor              verify pi config matches reality
-llmctl logs <model> [n]    tail that server's tmux output
+llmctl status                 what is running right now
+llmctl list                   available models
+llmctl start <model>          start one (stops the others first)
+llmctl stop [<model>|all]     stop one or everything
+llmctl restart <model>        stop + start
+llmctl use <model>            start it and print the matching pi command
+llmctl logs <model> [n]       tail that server's tmux output
+
+llmctl download <model>       fetch that model's weights
+llmctl pi-setup [<model>]     write/refresh pi's provider entries
+llmctl tools [<model>|scan]   show tool allowlists, or rediscover tool names
+llmctl config <sub>           per-machine overrides (see below)
+llmctl doctor                 verify pi's config matches what is running
 ```
+
+`llmctl config` subcommands:
+
+| Command | Does |
+|---|---|
+| `config` or `config show` | effective value of every key, and whether it is a default or an override |
+| `config init` | create the overrides file, pre-filled with the defaults as comments |
+| `config set <model>.<key> <value>` | set an override (validates model and key) |
+| `config unset <model>.<key>` | remove it, reverting to the default |
+| `config path` | print the config file location |
+
+Only `ctx` and `toolpolicy` are overridable; `config set` rejects anything else.
+
 
 **`start` enforces one model at a time** — it stops the others first, because
 together they exceed the 48 GiB Metal working set. Override with `--keep` if you
-genuinely want both up (`llmctl start qwen3.8 --keep`).
+genuinely want both up (`llmctl start qwen3-8 --keep`).
 
 `doctor` is the one to run when something looks wrong. It checks, per model:
 weights present, `serve.sh` executable, the pi provider exists and its `baseUrl`
@@ -79,7 +97,7 @@ setup actually hit: the two are independent settings, and a mismatch silently
 makes pi compact early or overflow the server. It also warns if more than one
 server is up, and if tmux `extended-keys-format` is not `csi-u`.
 
-Measured cold starts: qwen3.6 ~10s, qwen3.8 ~12s (weights in page cache).
+Measured cold starts: qwen3-6 ~10s, qwen3-8 ~12s (weights in page cache).
 
 
 ## Tool policy
@@ -89,7 +107,7 @@ pi's `--tools` is an **allowlist** spanning built-in, extension and custom tools
 
 ```
 llmctl tools              show both models' effective lists
-llmctl tools qwen3.8      show one
+llmctl tools qwen3-8      show one
 llmctl tools scan         rediscover tool names from pi's extensions
 ```
 
@@ -100,7 +118,7 @@ llmctl tools scan         rediscover tool names from pi's extensions
 | `default` | pass no `--tools`; pi's own defaults |
 | *literal list* | used verbatim as the allowlist |
 
-Current defaults: **qwen3.6 = `all`** (34 tools), **qwen3.8 = `offline`** (30) —
+Current defaults: **qwen3-6 = `all`** (34 tools), **qwen3-8 = `offline`** (30) —
 excluding `websearch`, `web_search_exa`, `webfetch` and `generate_image`.
 
 Two things worth knowing:
@@ -123,8 +141,8 @@ so a checkout can be shared without carrying one machine's tuning.
 ```
 llmctl config                              show effective values and their source
 llmctl config init                         seed the file with the defaults, commented
-llmctl config set qwen3.8.ctx 32768        override
-llmctl config unset qwen3.8.ctx            back to the default
+llmctl config set qwen3-8.ctx 32768        override
+llmctl config unset qwen3-8.ctx            back to the default
 llmctl config path                         where the file lives
 ```
 
@@ -136,8 +154,8 @@ Defaults:
 
 | Model | ctx | toolpolicy |
 |---|---|---|
-| qwen3.6 | 131072 | `all` |
-| qwen3.8 | 65536 | `offline` |
+| qwen3-6 | 131072 | `all` |
+| qwen3-8 | 65536 | `offline` |
 
 `ctx` feeds two places that must agree, and `llmctl` now keeps them in sync:
 `llmctl start` exports it as `CTX` to `serve.sh` (so llama-server's `-c` matches),
@@ -168,8 +186,8 @@ cd ~/models
 ./install.sh                  # check what's missing (safe, changes nothing)
 ./install.sh --install-deps   # actually install it
 
-llmctl download qwen3.6       # ~23 GB
-llmctl start qwen3.6
+llmctl download qwen3-6       # ~23 GB
+llmctl start qwen3-6
 llmctl doctor
 ```
 
@@ -211,7 +229,7 @@ changing a model's port or context window.
 
 Each model dir has a `download.sh`, also reachable as `llmctl download <model>`.
 Both are re-runnable — `hf` resumes partial files and skips complete ones.
-Quant is overridable: `QUANT=6-bit ./qwen3.8-mlx/download.sh`.
+Quant is overridable: `QUANT=6-bit ./qwen3-8-mlx/download.sh`.
 
 Weights come from public HuggingFace repos; no HF token is needed.
 
@@ -323,11 +341,11 @@ Verified: "What is 2+2?" returns `4` in 2 tokens instead of ~190.
 
 # Model B — Qwen3.8-27B-Uncensored (MLX, dense)
 
-Added 2026-08-24. Lives at `~/models/qwen3.8-mlx/`, served by `mlx_lm.server`
+Added 2026-08-24. Lives at `~/models/qwen3-8-mlx/`, served by `mlx_lm.server`
 on **port 8081** (8080 belongs to the llama-server above).
 
 ```bash
-tmux new-session -d -s mlx -c ~/models/qwen3.8-mlx './serve.sh'
+tmux new-session -d -s mlx -c ~/models/qwen3-8-mlx './serve.sh'
 curl -s localhost:8081/v1/models
 ```
 
@@ -339,7 +357,7 @@ Source: `orcarouter/Qwen3.8-27B-Uncensored-MLX`, `4-bit/` subfolder (15 GB) plus
 
 ```bash
 hf download orcarouter/Qwen3.8-27B-Uncensored-MLX \
-  --include "4-bit/*" --include "mtp/*" --local-dir ~/models/qwen3.8-mlx
+  --include "4-bit/*" --include "mtp/*" --local-dir ~/models/qwen3-8-mlx
 ```
 
 `--include` must be **repeated**, not given multiple patterns. `--include "a/*" "b/*"`
@@ -384,8 +402,8 @@ would help most here, since dense generation is the slow path.
 
 ## Pi provider
 
-`mlx-qwen3.8` in `~/.pi/agent/models.json` → `http://127.0.0.1:8081/v1`,
-model id is the **absolute path** `<repo>/qwen3.8-mlx/4-bit`
+`mlx-qwen3-8` in `~/.pi/agent/models.json` → `http://127.0.0.1:8081/v1`,
+model id is the **absolute path** `<repo>/qwen3-8-mlx/4-bit`
 (that is what `/v1/models` reports).
 
 Response field differs from llama.cpp: MLX returns `message.reasoning`, whereas
