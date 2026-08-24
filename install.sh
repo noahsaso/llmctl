@@ -113,6 +113,13 @@ else
   echo "        set -g extended-keys-format csi-u"
 fi
 
+echo
+echo "defaults"
+"$DIR/llmctl" config init >/dev/null 2>&1 || true
+ok "overrides file: $("$DIR/llmctl" config path)"
+"$DIR/llmctl" config show 2>/dev/null | tail -n +3 | sed 's/^/    /'
+echo "    edit that file, or: llmctl config set <model>.<key> <value>"
+
 if [ "$DO_PI" = 1 ] && command -v pi >/dev/null; then
   echo
   echo "pi providers"

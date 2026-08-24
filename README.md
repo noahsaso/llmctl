@@ -115,6 +115,35 @@ Two things worth knowing:
 Edit `TOOLS_BUILTIN` / `TOOLS_EXT` / `TOOLS_NET` at the top of `llmctl` after
 changing extensions; `llmctl tools scan` prints what to put there.
 
+## Defaults and overrides
+
+Built-in defaults live in `llmctl`; per-machine overrides live in a config file
+so a checkout can be shared without carrying one machine's tuning.
+
+```
+llmctl config                              show effective values and their source
+llmctl config init                         seed the file with the defaults, commented
+llmctl config set qwen3.8.ctx 32768        override
+llmctl config unset qwen3.8.ctx            back to the default
+llmctl config path                         where the file lives
+```
+
+Default location `~/.config/llmctl/config` (override with `LLMCTL_CONFIG`),
+format one `model.key=value` per line. Overridable keys: **`ctx`** and
+**`toolpolicy`**. `install.sh` seeds the file and prints the effective table.
+
+Defaults:
+
+| Model | ctx | toolpolicy |
+|---|---|---|
+| qwen3.6 | 131072 | `all` |
+| qwen3.8 | 65536 | `offline` |
+
+`ctx` feeds two places that must agree, and `llmctl` now keeps them in sync:
+`llmctl start` exports it as `CTX` to `serve.sh` (so llama-server's `-c` matches),
+and `llmctl pi-setup` writes it as pi's `contextWindow`. After changing it,
+restart the server and re-run `pi-setup` — `llmctl config set` reminds you.
+
 ## Bootstrapping a new machine
 
 This repo holds the layout, scripts, and docs — **not** the weights (tens of GB,
@@ -333,13 +362,14 @@ Both measured on this machine. The 3× generation gap is the dense/MoE tradeoff.
 | Context | KV | + 15 GB weights |
 |---|---|---|
 | 16384 | 4 GiB | 19 GB |
-| **32768 (pi default)** | **8 GiB** | **23 GB** |
-| 65536 | 16 GiB | 31 GB |
+| 32768 | 8 GiB | 23 GB |
+| **65536 (default)** | **16 GiB** | **31 GB** |
 | 131072 | 32 GiB | 47 GB |
 
-The Metal working set is 48 GiB total. At 32768 this coexists with the
-Qwen3.6 llama-server (~24.6 GB) only just — 47.6 GB combined. **In practice run
-one at a time**; stop the other session before pushing either to long context.
+The Metal working set is 48 GiB total. At the 65536 default this model alone is
+31 GB (65%), which is fine — but it can **no longer coexist** with the Qwen3.6
+llama-server (24.6 GB), since 55.6 GB exceeds the budget. `llmctl` runs one
+server at a time anyway. Drop to 32768 if you want both up via `--keep`.
 
 `mlx_lm.server` has no `-c` equivalent; the cache grows as needed. Bound it with
 `--prompt-cache-bytes` / `--prompt-cache-size` if desired.

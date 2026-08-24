@@ -12,6 +12,7 @@
 #   llmctl download <model>    fetch that model's weights
 #   llmctl pi-setup [<model>]  write/refresh pi provider entries
 #   llmctl tools [<model>|scan] show each model's tool allowlist
+#   llmctl config [show|init|set] per-machine overrides (ctx, toolpolicy)
 #
 # Only one model server is meant to run at a time: together they exceed the
 # 48 GiB Metal working set. `start` enforces that unless you pass --keep.
@@ -20,6 +21,26 @@ set -uo pipefail
 
 MODELS="qwen3.6 qwen3.8"
 PI_MODELS="${PI_MODELS:-$HOME/.pi/agent/models.json}"
+
+# Optional per-machine overrides. Format: one "model.key=value" per line, # comments.
+# Overridable keys: ctx, toolpolicy.   Seed one with: llmctl config init
+LLMCTL_CONFIG="${LLMCTL_CONFIG:-$HOME/.config/llmctl/config}"
+
+cfg_get() { # cfg_get <model> <key>  -> override value, or empty
+  [ -f "$LLMCTL_CONFIG" ] || return 0
+  awk -F'=' -v key="$1.$2" '
+    /^[[:space:]]*#/ { next }
+    NF >= 2 {
+      k = $1; gsub(/[[:space:]]/, "", k)
+      if (k == key) { sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); v = $0 }
+    }
+    END { if (v != "") print v }' "$LLMCTL_CONFIG"
+}
+
+eff() { # eff <model> <key>  -> override if set, else built-in default
+  local v; v="$(cfg_get "$1" "$2")"
+  if [ -n "$v" ]; then echo "$v"; else meta "$1" "$2"; fi
+}
 
 # Repo root, resolved through any symlink (llmctl is normally linked onto PATH).
 # Everything is relative to this, so the checkout can live anywhere.
@@ -45,11 +66,11 @@ TOOLS_NET="websearch,web_search_exa,webfetch,generate_image"
 
 # tools_for <model> -> comma list for --tools, or empty for pi's own defaults
 tools_for() {
-  case "$(meta "$1" toolpolicy)" in
+  case "$(eff "$1" toolpolicy)" in
     all)     echo "$TOOLS_BUILTIN,$TOOLS_EXT,$TOOLS_NET" ;;
     offline) echo "$TOOLS_BUILTIN,$TOOLS_EXT" ;;
     default) echo "" ;;
-    *)       meta "$1" toolpolicy ;;   # literal allowlist
+    *)       eff "$1" toolpolicy ;;   # literal allowlist
   esac
 }
 
@@ -78,7 +99,7 @@ meta() { # meta <model> <field>
     qwen3.8:weights)  echo "$ROOT/qwen3.8-mlx/4-bit" ;;
     qwen3.8:desc)     echo "27B dense, MLX 4-bit, ~13 tok/s" ;;
     qwen3.8:label)    echo "Local Qwen3.8 27B Uncensored (MLX 4-bit)" ;;
-    qwen3.8:ctx)      echo "32768" ;;
+    qwen3.8:ctx)      echo "65536" ;;
     qwen3.8:size)     echo "~16 GB" ;;
     qwen3.8:toolpolicy) echo "offline" ;;
     *) return 1 ;;
@@ -200,7 +221,10 @@ cmd_start() {
     echo "error: $dir/serve.sh missing or not executable" >&2; exit 1
   fi
   tmux kill-session -t "$(meta "$model" session)" 2>/dev/null
-  tmux new-session -d -s "$(meta "$model" session)" -c "$dir" './serve.sh'
+  # Export CTX so llama-server's -c matches pi's contextWindow. mlx serve.sh
+  # ignores it (mlx_lm has no fixed context flag).
+  tmux new-session -d -s "$(meta "$model" session)" -c "$dir" \
+    "CTX=$(eff "$model" ctx) ./serve.sh"
   printf "starting %s" "$model"
   local n=0
   while ! is_up "$model" && [ $n -lt 300 ]; do
@@ -332,7 +356,7 @@ except Exception: print('')" 2>/dev/null)
     note "extension dir $_extdir not found; skipping tool-name check (set PI_EXT_DIR)"
   fi
   for m in $MODELS; do
-    ok "$m tool policy: $(meta "$m" toolpolicy) ($(tools_for "$m" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') tools)"
+    ok "$m tool policy: $(eff "$m" toolpolicy) ($(tools_for "$m" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ') tools)"
   done
   echo
   echo "environment"
@@ -372,11 +396,13 @@ cmd_pi_setup() {
   # Build "provider|label|baseUrl|id|ctx" lines for python to merge.
   local spec=""
   for m in $list; do
-    spec="$spec$(meta "$m" provider)|$(meta "$m" label)|http://127.0.0.1:$(meta "$m" port)/v1|$(meta "$m" id)|$(meta "$m" ctx)
+    spec="$spec$(meta "$m" provider)|$(meta "$m" label)|http://127.0.0.1:$(meta "$m" port)/v1|$(meta "$m" id)|$(eff "$m" ctx)
 "
   done
 
-  printf '%s' "$spec" | python3 - "$PI_MODELS" <<'PY'
+  # NOTE: `python3 -` takes its program from stdin, which the heredoc supplies.
+  # The spec therefore has to arrive by env, not by pipe.
+  LLMCTL_SPEC="$spec" python3 - "$PI_MODELS" <<'PY'
 import json, os, sys, shutil
 path = os.path.expanduser(sys.argv[1])
 os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -394,7 +420,7 @@ if os.path.exists(path):
 
 providers = doc.setdefault("providers", {})
 changed = []
-for line in sys.stdin.read().splitlines():
+for line in os.environ.get("LLMCTL_SPEC", "").splitlines():
     if not line.strip():
         continue
     name, label, url, mid, ctx = line.split("|")
@@ -444,12 +470,85 @@ cmd_tools() {
   local list="${1:-$MODELS}"
   [ "$list" != "$MODELS" ] && need_model "$1"
   for m in $list; do
-    local pol t; pol="$(meta "$m" toolpolicy)"; t="$(tools_for "$m")"
+    local pol t; pol="$(eff "$m" toolpolicy)"; t="$(tools_for "$m")"
     echo "$m  (policy: $pol)"
     if [ -z "$t" ]; then echo "  pi defaults (no --tools passed)"
     else echo "$t" | tr ',' '\n' | sed 's/^/  /'; fi
     echo
   done
+}
+
+
+cmd_config() {
+  case "${1:-show}" in
+    path) echo "$LLMCTL_CONFIG" ;;
+    init)
+      if [ -f "$LLMCTL_CONFIG" ]; then echo "already exists: $LLMCTL_CONFIG"; return 0; fi
+      mkdir -p "$(dirname "$LLMCTL_CONFIG")"
+      {
+        echo "# llmctl overrides - one \"model.key=value\" per line."
+        echo "# Overridable keys: ctx, toolpolicy"
+        echo "# toolpolicy: all | offline | default | an explicit comma list"
+        echo "# Uncomment and edit to override the built-in defaults shown below."
+        echo
+        for m in $MODELS; do
+          echo "# $m.ctx=$(meta "$m" ctx)"
+          echo "# $m.toolpolicy=$(meta "$m" toolpolicy)"
+        done
+      } > "$LLMCTL_CONFIG"
+      echo "wrote $LLMCTL_CONFIG"
+      ;;
+    set)
+      shift
+      local kv="${1:-}" val="${2:-}"
+      case "$kv" in *.*) ;; *) echo "usage: llmctl config set <model>.<key> <value>" >&2; exit 2 ;; esac
+      # model names contain dots (qwen3.8), so split on the LAST dot
+      local m="${kv%.*}" k="${kv##*.}"
+      need_model "$m"
+      case "$k" in ctx|toolpolicy) ;; *) echo "error: only ctx and toolpolicy are overridable" >&2; exit 2 ;; esac
+      [ -n "$val" ] || { echo "usage: llmctl config set <model>.<key> <value>" >&2; exit 2; }
+      mkdir -p "$(dirname "$LLMCTL_CONFIG")"; touch "$LLMCTL_CONFIG"
+      # drop any existing entry, then append
+      grep -v "^[[:space:]]*${m}\.${k}[[:space:]]*=" "$LLMCTL_CONFIG" > "$LLMCTL_CONFIG.tmp" 2>/dev/null || true
+      mv "$LLMCTL_CONFIG.tmp" "$LLMCTL_CONFIG"
+      echo "${m}.${k}=${val}" >> "$LLMCTL_CONFIG"
+      echo "set ${m}.${k}=${val}"
+      # plain [ ] tests here would leave a non-zero exit status on the last line
+      if [ "$k" = "ctx" ]; then
+        echo "  restart the server and re-run 'llmctl pi-setup' to apply"
+      elif [ "$k" = "toolpolicy" ]; then
+        echo "  applies to the next 'llmctl use $m'"
+      fi
+      ;;
+    unset)
+      shift
+      local kv="${1:-}"
+      case "$kv" in *.*) ;; *) echo "usage: llmctl config unset <model>.<key>" >&2; exit 2 ;; esac
+      local m="${kv%.*}" k="${kv##*.}"
+      need_model "$m"
+      [ -f "$LLMCTL_CONFIG" ] || { echo "no config file"; return 0; }
+      if grep -q "^[[:space:]]*${m}\.${k}[[:space:]]*=" "$LLMCTL_CONFIG"; then
+        grep -v "^[[:space:]]*${m}\.${k}[[:space:]]*=" "$LLMCTL_CONFIG" > "$LLMCTL_CONFIG.tmp"
+        mv "$LLMCTL_CONFIG.tmp" "$LLMCTL_CONFIG"
+        echo "unset ${m}.${k} (back to default: $(meta "$m" "$k"))"
+      else
+        echo "${m}.${k} was not overridden"
+      fi
+      ;;
+    show|"")
+      echo "config: $LLMCTL_CONFIG$([ -f "$LLMCTL_CONFIG" ] || echo '  (none yet - llmctl config init)')"
+      echo
+      printf "%-9s %-12s %-34s %s\n" MODEL KEY VALUE SOURCE
+      for m in $MODELS; do
+        for k in ctx toolpolicy; do
+          local o; o="$(cfg_get "$m" "$k")"
+          if [ -n "$o" ]; then printf "%-9s %-12s %-34s %s\n" "$m" "$k" "$o" "override"
+          else printf "%-9s %-12s %-34s %s\n" "$m" "$k" "$(meta "$m" "$k")" "default"; fi
+        done
+      done
+      ;;
+    *) echo "usage: llmctl config [show|init|set <model>.<key> <value>|unset <model>.<key>|path]" >&2; exit 2 ;;
+  esac
 }
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -465,6 +564,7 @@ case "${1:-status}" in
   download) shift; cmd_download "${1:-}" ;;
   pi-setup) shift; cmd_pi_setup "${1:-all}" ;;
   tools)   shift; cmd_tools "${1:-}" ;;
+  config)  shift; cmd_config "$@" ;;
   doctor|check) cmd_doctor ;;
   -h|--help|help) usage ;;
   *) echo "unknown command: $1" >&2; echo; usage; exit 2 ;;
