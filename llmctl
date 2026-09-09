@@ -138,13 +138,13 @@ srv_rss() { # GiB
 
 pi_field() { # pi_field <provider> <jq-ish field>
   [ -f "$PI_MODELS" ] || return 1
-  python3 - "$1" "$2" <<'PY' 2>/dev/null
-import json,sys,os
-try: d=json.load(open(os.path.expanduser("~/.pi/agent/models.json")))
+  python3 - "$PI_MODELS" "$1" "$2" <<'PY' 2>/dev/null
+import json,sys
+try: d=json.load(open(sys.argv[1]))
 except Exception: sys.exit(1)
-p=d.get("providers",{}).get(sys.argv[1])
+p=d.get("providers",{}).get(sys.argv[2])
 if not p: sys.exit(1)
-f=sys.argv[2]
+f=sys.argv[3]
 if f=="baseUrl": print(p.get("baseUrl",""))
 else: print(p.get("models",[{}])[0].get(f,""))
 PY
@@ -283,7 +283,11 @@ cmd_doctor() {
 
   echo "pi config"
   if [ ! -f "$PI_MODELS" ]; then bad "$PI_MODELS missing"; else
-    if python3 -c "import json,sys;json.load(open('$PI_MODELS'))" 2>/dev/null; then
+    if python3 - "$PI_MODELS" <<'PY' 2>/dev/null
+import json, sys
+json.load(open(sys.argv[1]))
+PY
+    then
       ok "models.json is valid JSON"
     else bad "models.json is NOT valid JSON"; fi
   fi
