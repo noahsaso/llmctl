@@ -485,6 +485,9 @@ Measured on M4 Pro / 64 GB, IQ4_NL: **23.6 tok/s** generation, 19 GB resident at
 the 65536 default context. The model supports up to 1M tokens; the default is
 conservative and untuned.
 
+Tool calling works end to end through pi: verified by having the model read a
+file containing a random UUID and return it exactly.
+
 Gotchas:
 
 - Reasoning model, same `content` / `reasoning_content` split as Model A.
