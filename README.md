@@ -163,6 +163,28 @@ Defaults:
 and `llmctl pi-setup` writes it as pi's `contextWindow`. After changing it,
 restart the server and re-run `pi-setup` — `llmctl config set` reminds you.
 
+### Changing the context window
+
+```bash
+llmctl config set inkling-2-mini.ctx 131072   # 1. record the override
+llmctl restart inkling-2-mini                 # 2. server picks it up as -c
+llmctl pi-setup inkling-2-mini                # 3. pi's contextWindow follows
+```
+
+Then restart pi (it reads `models.json` at startup) and run `llmctl doctor`,
+which (for the llama-server models) checks that pi's `contextWindow` equals
+the running server's `-c`.
+`llmctl config unset inkling-2-mini.ctx` plus the same two follow-up steps
+reverts to the default.
+
+All three steps are needed: the override alone changes nothing until the server
+restarts, and skipping `pi-setup` leaves pi believing the old size, so it
+compacts early or overflows the server. For the same reason, prefer this over
+`CTX=... ./serve.sh`, which changes the server only.
+
+A larger context costs KV memory. The Qwen sections have per-token figures;
+Inkling's growth is not measured yet (it supports up to 1M tokens).
+
 ### Enforcing policy inside a session
 
 `--tools` binds at launch, so switching model with `/model` (or Ctrl+P, or a
