@@ -13,3 +13,6 @@
 **/.cache/
 
 .DS_Store
+
+# Locally built runtimes (see inkling-2-mini/build-llama.sh)
+/.build/

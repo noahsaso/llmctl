@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-MODELS="qwen3-6 qwen3-8"
+MODELS="qwen3-6 qwen3-8 inkling-2-mini"
 PI_MODELS="${PI_MODELS:-$HOME/.pi/agent/models.json}"
 
 # Optional per-machine overrides. Format: one "model.key=value" per line, # comments.
@@ -113,6 +113,22 @@ meta() { # meta <model> <field>
     qwen3-8:ctx)      echo "65536" ;;
     qwen3-8:size)     echo "~16 GB" ;;
     qwen3-8:toolpolicy) echo "offline" ;;
+    inkling-2-mini:session)  echo "inkling" ;;
+    inkling-2-mini:port)     echo "8082" ;;
+    inkling-2-mini:dir)      echo "$ROOT/inkling-2-mini" ;;
+    inkling-2-mini:health)   echo "/health" ;;
+    inkling-2-mini:provider) echo "llama-inkling" ;;
+    inkling-2-mini:id)       echo "$ROOT/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf" ;;
+    inkling-2-mini:weights)  echo "$ROOT/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf" ;;
+    inkling-2-mini:desc)     echo "looped MoE, GGUF/llama.cpp (needs PR build)" ;;
+    inkling-2-mini:label)    echo "Local Inkling 2 Mini (IQ4_NL, Metal)" ;;
+    inkling-2-mini:ctx)      echo "65536" ;;
+    inkling-2-mini:size)     echo "~18 GB" ;;
+    inkling-2-mini:toolpolicy) echo "all" ;;
+    inkling-2-mini:runtime)  echo "llama" ;;
+    qwen3-6:runtime)         echo "llama" ;;
+    qwen3-8:runtime)         echo "mlx" ;;
+
     *) return 1 ;;
   esac
 }
@@ -152,15 +168,15 @@ PY
 
 # ---------- commands ----------
 cmd_list() {
-  printf "%-9s %-8s %-6s %s\n" MODEL SESSION PORT DESCRIPTION
+  printf "%-15s %-8s %-6s %s\n" MODEL SESSION PORT DESCRIPTION
   for m in $MODELS; do
-    printf "%-9s %-8s %-6s %s\n" "$m" "$(meta "$m" session)" "$(meta "$m" port)" "$(meta "$m" desc)"
+    printf "%-15s %-8s %-6s %s\n" "$m" "$(meta "$m" session)" "$(meta "$m" port)" "$(meta "$m" desc)"
   done
 }
 
 cmd_status() {
   local any=0
-  printf "%-9s %-9s %-6s %-8s %-7s %s\n" MODEL STATE PORT SESSION MEM PROVIDER
+  printf "%-15s %-9s %-6s %-8s %-7s %s\n" MODEL STATE PORT SESSION MEM PROVIDER
   for m in $MODELS; do
     local state mem sess
     sess="-"; mem="-"
@@ -173,7 +189,7 @@ cmd_status() {
     else
       state="stopped"
     fi
-    printf "%-9s %-9s %-6s %-8s %-7s %s\n" \
+    printf "%-15s %-9s %-6s %-8s %-7s %s\n" \
       "$m" "$state" "$(meta "$m" port)" "$sess" "$mem" "$(meta "$m" provider)"
   done
   [ "$any" = 0 ] && echo && echo "nothing running. start one: llmctl start <model>"
@@ -316,7 +332,7 @@ PY
     ctx="$(pi_field "$prov" contextWindow)" || ctx=""
     if [ -z "$ctx" ]; then note "no contextWindow set for '$prov'"
     else
-      if [ "$m" = "qwen3-6" ] && is_up "$m"; then
+      if [ "$(meta "$m" runtime)" = "llama" ] && is_up "$m"; then
         local real
         real=$(ps -o args= -p "$(srv_pid "$m")" 2>/dev/null | tr ' ' '\n' | grep -A1 '^-c$' | tail -1)
         if [ -n "$real" ] && [ "$real" != "$ctx" ]; then
@@ -578,12 +594,12 @@ cmd_config() {
     show|"")
       echo "config: $LLMCTL_CONFIG$([ -f "$LLMCTL_CONFIG" ] || echo '  (none yet - llmctl config init)')"
       echo
-      printf "%-9s %-12s %-34s %s\n" MODEL KEY VALUE SOURCE
+      printf "%-15s %-12s %-34s %s\n" MODEL KEY VALUE SOURCE
       for m in $MODELS; do
         for k in ctx toolpolicy; do
           local o; o="$(cfg_get "$m" "$k")"
-          if [ -n "$o" ]; then printf "%-9s %-12s %-34s %s\n" "$m" "$k" "$o" "override"
-          else printf "%-9s %-12s %-34s %s\n" "$m" "$k" "$(meta "$m" "$k")" "default"; fi
+          if [ -n "$o" ]; then printf "%-15s %-12s %-34s %s\n" "$m" "$k" "$o" "override"
+          else printf "%-15s %-12s %-34s %s\n" "$m" "$k" "$(meta "$m" "$k")" "default"; fi
         done
       done
       ;;

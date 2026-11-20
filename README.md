@@ -156,6 +156,7 @@ Defaults:
 |---|---|---|
 | qwen3-6 | 131072 | `all` |
 | qwen3-8 | 65536 | `offline` |
+| inkling-2-mini | 65536 | `all` |
 
 `ctx` feeds two places that must agree, and `llmctl` now keeps them in sync:
 `llmctl start` exports it as `CTX` to `serve.sh` (so llama-server's `-c` matches),
@@ -448,6 +449,52 @@ The stale `mlx-llm-turboquant-server` provider was **removed**. It pointed at
 :8080 — llama-server — which answers any model id, so selecting it silently
 returned Qwen3.6 output labelled as the old MLX model. Backup of the previous
 config: `~/.pi/agent/models.json.bak`.
+
+---
+
+# Model C — Inkling 2 Mini (GGUF, looped MoE)
+
+Added 2026-11-20. `inkling-2-mini/`, served by llama-server on **port 8082**.
+
+```bash
+./inkling-2-mini/build-llama.sh    # one-off: builds a llama-server that can load it
+llmctl download inkling-2-mini     # ~18 GB
+llmctl start inkling-2-mini
+```
+
+Thinking Machines' Inkling 2 Mini is a looped transformer: 24 layers of weights,
+the middle 12 run three times (48 layer applications per token), 8 of 128
+experts active. Multimodal; the vision projector is picked up automatically.
+
+**It needs a patched llama.cpp for now.** As of 2026-11-20 Homebrew's llama.cpp
+(v1.0.0) predates Inkling support entirely, and the looped variant is only in the
+open PR [ggml-org/llama.cpp#32694](https://github.com/ggml-org/llama.cpp/pull/32694).
+`build-llama.sh` builds that PR, pinned to a commit, into `<repo>/.build/`
+(gitignored, ~400 MB, needs `cmake`). The system llama.cpp is not touched, so
+Model A keeps running on the Homebrew build. `serve.sh` prefers the local build
+and falls back to `llama-server` on PATH, so once the PR ships in a release you
+can delete `.build/`.
+
+**Use ggml-org's GGUF, not unsloth's.** `unsloth/Inkling-2-Mini-GGUF` currently
+declares `block_count=48` while packing 24 physical blocks and fails with
+`tensor 'blk.24.attn_q.weight' not found`. `ggml-org/Inkling-2-Mini-GGUF`
+(`inkling2_loop`, `block_count=24`) matches the PR's loader. Quants there:
+IQ4_NL (17.6 GB, default) and Q8_0 (27.8 GB): `QUANT=Q8_0 ./download.sh`.
+
+Measured on M4 Pro / 64 GB, IQ4_NL: **23.6 tok/s** generation, 19 GB resident at
+the 65536 default context. The model supports up to 1M tokens; the default is
+conservative and untuned.
+
+Gotchas:
+
+- Reasoning model, same `content` / `reasoning_content` split as Model A.
+- `chat_template_kwargs: {"enable_thinking": false}` did **not** switch thinking
+  off in testing (it still produced reasoning tokens).
+- No `-ctk/-ctv q8_0` in `serve.sh`: KV quantization is untested on this
+  architecture.
+- The model card warns of long reasoning loops and of destructive actions in
+  agentic use without confirmation. Tool policy defaults to `all`; tighten with
+  `llmctl config set inkling-2-mini.toolpolicy offline` or a literal list.
 
 ---
 
